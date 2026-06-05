@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>踏云行 · 跑酷</title>
+    <style>
+        :root { --bg: #f5f0eb; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #eae4dc;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'KaiTi', sans-serif;
+            -webkit-tap-highlight-color: transparent;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+            touch-action: manipulation;
+        }
+        .game-wrapper {
+            position: relative;
+            background: #f7f3ed;
+            border-radius: 18px;
+            box-shadow: 0 6px 28px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.05);
+            overflow: hidden;
+            max-width: 800px;
+            width: 95vw;
+            aspect-ratio: 2/1;
+            transition: box-shadow 0.3s ease;
+        }
+        canvas { display: block; width: 100%; height: 100%; cursor: pointer; border-radius: 18px; }
+        .hint-bar {
+            position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+            font-size: 11px; letter-spacing: 0.05em; color: #b8a99a;
+            pointer-events: none; transition: opacity 0.8s ease; text-align: center;
+            white-space: nowrap; font-weight: 400; z-index: 10;
+        }
+        .mobile-controls {
+            position: absolute; bottom: 20px; right: 20px; display: none;
+            gap: 14px; z-index: 20; pointer-events: none;
+        }
+        .ctrl-btn {
+            width: 56px; height: 56px; border-radius: 50%;
+            background: rgba(245,240,235,0.8); backdrop-filter: blur(6px);
+            border: 1px solid rgba(180,160,140,0.5); box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            display: flex; align-items: center; justify-content: center;
+            pointer-events: auto; transition: background 0.15s, transform 0.1s;
+            color: #5c4f42; font-size: 28px; font-weight: 300; line-height: 1; user-select: none;
+        }
+        .ctrl-btn:active { background: rgba(235,225,215,0.9); transform: scale(0.94); }
+        .ctrl-btn.up::after { content: "↑"; }
+        .ctrl-btn.down::after { content: "↓"; }
+        @media (max-width: 600px) {
+            .game-wrapper { width: 98vw; border-radius: 14px; }
+            canvas { border-radius: 14px; }
+            .hint-bar { bottom: 8px; font-size: 10px; }
+            .ctrl-btn { width: 50px; height: 50px; font-size: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="game-wrapper" id="wrapper">
+        <canvas id="gameCanvas"></canvas>
+        <div class="hint-bar" id="hintBar">↑ 跳跃  ↓ 蹲下 · 按任意键开始</div>
+        <div class="mobile-controls" id="mobileControls">
+            <div class="ctrl-btn up" id="btnJump"></div>
+            <div class="ctrl-btn down" id="btnCrouch"></div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            const hintBar = document.getElementById('hintBar');
+            const mobileControls = document.getElementById('mobileControls');
+            const btnJump = document.getElementById('btnJump');
+            const btnCrouch = document.getElementById('btnCrouch');
+
+            const GAME_WIDTH = 800;
+            const GAME_HEIGHT = 400;
+            const GROUND_Y = 310;
+            const GROUND_HEIGHT = 90;
+
+            canvas.width = GAME_WIDTH;
+            canvas.height = GAME_HEIGHT;
+
+            const isMobile = /Android|iPhone|iPad|iPod|webOS/i.test(navigator.userAgent) || ('ontouchstart' in window && window.innerWidth < 1024);
+            if (isMobile) {
+                mobileControls.style.display = 'flex';
+                hintBar.textContent = '按钮跳跃 / 按住蹲下';
+            } else {
+                hintBar.textContent = '↑ 跳跃  ↓ 蹲下 · 按任意键开始';
+            }
+
+            // ==================== 音效系统 ====================
+            let audioCtx = null;
+            function initAudio() {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+            }
+            function playTone(type) {
+                if (!audioCtx) return;
+                const now = audioCtx.currentTime;
+                const gain = audioCtx.createGain();
+                gain.connect(audioCtx.destination);
+                let osc;
+                switch (type) {
+                    case 'jump':
+                        osc = audioCtx.createOscillator(); osc.type = 'sine';
+                        osc.frequency.setValueAtTime(380, now); osc.frequency.linearRampToValueAtTime(620, now + 0.08);
+                        gain.gain.setValueAtTime(0.14, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+                        osc.connect(gain); osc.start(now); osc.stop(now + 0.15);
+                        break;
+                    case 'crouch':
+                        osc = audioCtx.createOscillator(); osc.type = 'triangle';
+                        osc.frequency.setValueAtTime(280, now); osc.frequency.linearRampToValueAtTime(180, now + 0.09);
+                        gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+                        osc.connect(gain); osc.start(now); osc.stop(now + 0.14);
+                        break;
+                    case 'hit':
+                        osc = audioCtx.createOscillator(); osc.type = 'sawtooth';
+                        osc.frequency.setValueAtTime(150, now); osc.frequency.linearRampToValueAtTime(60, now + 0.2);
+                        gain.gain.setValueAtTime(0.18, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+                        osc.connect(gain); osc.start(now); osc.stop(now + 0.25);
+                        break;
+                    case 'score':
+                        osc = audioCtx.createOscillator(); osc.type = 'sine';
+                        osc.frequency.setValueAtTime(720, now); osc.frequency.linearRampToValueAtTime(880, now + 0.06);
+                        gain.gain.setValueAtTime(0.09, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+                        osc.connect(gain); osc.start(now); osc.stop(now + 0.13);
+                        break;
+                }
+            }
+
+            // ==================== 游戏状态 ====================
+            const STATE = { IDLE: 'idle', PLAYING: 'playing', OVER: 'over' };
+            let gameState = STATE.IDLE;
+            let score = 0;
+            let bestScore = 0;
+            let gameSpeed = 5.2;
+            const baseSpeed = 5.2;
+            const maxSpeed = 14.5;
+            const speedIncrement = 0.35;
+            let frameCount = 0;
+            let difficultyTimer = 0;
+            let shakeAmount = 0;
+            let flashAlpha = 0;
+            let hintOpacity = 1;
+            let hintFadeTimer = 0;
+
+            // ==================== 角色 ====================
+            const player = {
+                x: 150, y: GROUND_Y, width: 28, height: 38,
+                crouchHeight: 16, vy: 0, isJumping: false,
+                isCrouching: false, crouchTimer: 0, crouchDuration: 400,
+                bounceOffset: 0, bouncePhase: 0,
+                color: '#d4855e', colorDark: '#b86e4a', colorLight: '#e69b78',
+                eyeColor: '#3d2b1e',
+            };
+            function resetPlayer() {
+                player.y = GROUND_Y; player.vy = 0;
+                player.isJumping = false; player.isCrouching = false;
+                player.crouchTimer = 0; player.bounceOffset = 0; player.bouncePhase = 0;
+            }
+            function getPlayerTop() {
+                return player.isCrouching ? player.y - player.crouchHeight : player.y - player.height;
+            }
+            function getPlayerBounds() {
+                const top = getPlayerTop();
+                return { x: player.x - player.width/2 + 4, y: top + 2, w: player.width - 8, h: player.y - top - 4 };
+            }
+
+            // ==================== 障碍物 (精确校准高度) ====================
+            let obstacles = [];
+            const OBSTACLE_TYPES = { GROUND: 'ground', AERIAL: 'aerial' };
+            function spawnObstacle() {
+                const type = Math.random() < 0.45 ? OBSTACLE_TYPES.AERIAL : OBSTACLE_TYPES.GROUND;
+                let obs;
+                if (type === OBSTACLE_TYPES.GROUND) {
+                    const h = 26 + Math.random() * 26;
+                    obs = { type: OBSTACLE_TYPES.GROUND, x: GAME_WIDTH + 40, y: GROUND_Y, width: 22 + Math.random() * 16, height: h };
+                } else {
+                    // 空中障碍：底部严格在295~302，蹲下头顶296，确保只有蹲下可通过
+                    const bottomY = 295 + Math.random() * 7; 
+                    const h = 20 + Math.random() * 28;
+                    const y = bottomY - h;
+                    obs = { type: OBSTACLE_TYPES.AERIAL, x: GAME_WIDTH + 40, y: y, width: 24 + Math.random() * 14, height: h, bottomY: bottomY };
+                }
+                obs.passed = false;
+                obstacles.push(obs);
+            }
+            function getObstacleBounds(obs) {
+                if (obs.type === OBSTACLE_TYPES.GROUND) {
+                    return { x: obs.x - obs.width/2 + 2, y: obs.y - obs.height, w: obs.width - 4, h: obs.height - 2 };
+                } else {
+                    return { x: obs.x - obs.width/2 + 2, y: obs.y, w: obs.width - 4, h: obs.height - 2 };
+                }
+            }
+
+            // ==================== 粒子系统 ====================
+            let particles = [];
+            function spawnDust(x, y) {
+                particles.push({ x, y, vx: -(gameSpeed*0.3+Math.random()*gameSpeed*0.6), vy: -(Math.random()*1.8+0.4), life: 0.4+Math.random()*0.6, maxLife: 0.4+Math.random()*0.6, size: 1.2+Math.random()*2.2, color: Math.random()<0.5?'#c4b8a8':'#d6cdbf' });
+            }
+            function spawnCollideParticles(x, y) {
+                for (let i=0; i<18; i++) {
+                    const angle = Math.random()*Math.PI*2, speed = 1.5+Math.random()*5;
+                    particles.push({ x, y, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed-3, life: 0.3+Math.random()*0.7, maxLife: 0.3+Math.random()*0.7, size: 1.5+Math.random()*3.5, color: Math.random()<0.5?'#e8a080':'#d4855e' });
+                }
+            }
+            function updateParticles(dt) {
+                for (let i=particles.length-1; i>=0; i--) {
+                    const p = particles[i];
+                    p.x += p.vx * dt * 60; p.y += p.vy * dt * 60;
+                    p.vy += 0.15 * dt * 60; p.life -= dt;
+                    if (p.life <= 0) particles.splice(i,1);
+                }
+            }
+            function drawParticles(ctx) {
+                for (const p of particles) {
+                    ctx.globalAlpha = Math.max(0, p.life/p.maxLife)*0.7;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            // ==================== 背景装饰 ====================
+            const bgMountains = [];
+            function initMountains() {
+                bgMountains.length = 0;
+                const layers = [
+                    { count:5, yBase:GROUND_Y-30, hRange:[40,90], wRange:[60,160], speedMul:0.12, color:'#e0d8ce' },
+                    { count:6, yBase:GROUND_Y-20, hRange:[55,120], wRange:[70,180], speedMul:0.22, color:'#d6ccc0' },
+                    { count:4, yBase:GROUND_Y-10, hRange:[70,150], wRange:[90,200], speedMul:0.35, color:'#cbc0b3' },
+                ];
+                for (const l of layers) {
+                    let cx = 0;
+                    for (let i=0; i<l.count; i++) {
+                        const w = l.wRange[0]+Math.random()*(l.wRange[1]-l.wRange[0]);
+                        const h = l.hRange[0]+Math.random()*(l.hRange[1]-l.hRange[0]);
+                        cx += w*0.7+Math.random()*100;
+                        bgMountains.push({ x:cx, y:l.yBase, width:w, height:h, speedMul:l.speedMul, color:l.color });
+                    }
+                }
+            }
+            let clouds = [];
+            function initClouds() {
+                clouds = [];
+                for (let i=0; i<5; i++) {
+                    clouds.push({ x: Math.random()*GAME_WIDTH, y: 30+Math.random()*100, width: 60+Math.random()*100, height: 18+Math.random()*30, speed: 0.2+Math.random()*0.5, opacity: 0.15+Math.random()*0.25 });
+                }
+            }
+            let birds = [];
+            function initBirds() {
+                birds = [];
+                for (let i=0; i<3; i++) {
+                    birds.push({ x: Math.random()*GAME_WIDTH*1.2, y: 60+Math.random()*120, wingPhase: Math.random()*Math.PI*2, speed: 0.8+Math.random()*1.5, size: 5+Math.random()*4, color: '#8b7a6b' });
+                }
+            }
+            function updateClouds(dt) {
+                for (const c of clouds) {
+                    c.x -= c.speed * dt * 60;
+                    if (c.x + c.width < -20) { c.x = GAME_WIDTH+40+Math.random()*100; c.y = 30+Math.random()*100; }
+                }
+            }
+            function updateBirds(dt) {
+                for (const b of birds) {
+                    b.x -= b.speed * dt * 60;
+                    b.wingPhase += dt * 10;
+                    if (b.x < -30) { b.x = GAME_WIDTH+40+Math.random()*150; b.y = 60+Math.random()*120; }
+                }
+            }
+            function drawClouds(ctx) {
+                for (const c of clouds) {
+                    ctx.fillStyle = `rgba(255,255,250,${c.opacity})`;
+                    ctx.beginPath(); ctx.ellipse(c.x, c.y, c.width*0.5, c.height*0.45, 0, 0, Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.ellipse(c.x-c.width*0.25, c.y+3, c.width*0.35, c.height*0.4, 0, 0, Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.ellipse(c.x+c.width*0.3, c.y-2, c.width*0.4, c.height*0.5, 0, 0, Math.PI*2); ctx.fill();
+                }
+            }
+            function drawBirds(ctx) {
+                for (const b of birds) {
+                    const wingAngle = Math.sin(b.wingPhase) * 0.6;
+                    ctx.strokeStyle = b.color; ctx.lineWidth = 1.8;
+                    ctx.beginPath();
+                    ctx.moveTo(b.x - b.size, b.y);
+                    ctx.quadraticCurveTo(b.x - b.size*0.3, b.y - b.size*0.7*wingAngle, b.x, b.y);
+                    ctx.quadraticCurveTo(b.x + b.size*0.3, b.y - b.size*0.7*wingAngle, b.x + b.size, b.y);
+                    ctx.stroke();
+                }
+            }
+            let groundDots = [];
+            function initGroundDots() {
+                groundDots = [];
+                for (let i=0; i<60; i++) {
+                    groundDots.push({ x: Math.random()*GAME_WIDTH*2, y: GROUND_Y+8+Math.random()*(GROUND_HEIGHT-16), size: 0.8+Math.random()*1.8, alpha: 0.15+Math.random()*0.35 });
+                }
+            }
+
+            // ==================== 输入处理 ====================
+            let isDownKeyHeld = false;
+            let crouchButtonHeld = false;
+
+            function jumpAction() {
+                if (gameState === STATE.OVER) { restartGame(); return; }
+                if (gameState === STATE.IDLE) startGame();
+                if (!player.isJumping && gameState === STATE.PLAYING) {
+                    player.vy = -11.5; player.isJumping = true;
+                    player.isCrouching = false; player.crouchTimer = 0;
+                    spawnDust(player.x-6, GROUND_Y); spawnDust(player.x+6, GROUND_Y);
+                    playTone('jump');
+                }
+            }
+            function crouchAction() {
+                if (gameState === STATE.OVER) return;
+                if (gameState === STATE.IDLE) startGame();
+                if (gameState === STATE.PLAYING) {
+                    player.isCrouching = true; player.crouchTimer = player.crouchDuration;
+                    if (player.isJumping && player.vy < -3) player.vy = -3;
+                    playTone('crouch');
+                }
+            }
+            function crouchRelease() {
+                if (gameState === STATE.PLAYING && player.isCrouching && !isDownKeyHeld && !crouchButtonHeld) {
+                    player.isCrouching = false; player.crouchTimer = 0;
+                }
+            }
+
+            document.addEventListener('keydown', (e) => {
+                if (gameState !== STATE.PLAYING) {
+                    e.preventDefault();
+                    initAudio();
+                    if (gameState === STATE.OVER) restartGame();
+                    else if (gameState === STATE.IDLE) startGame();
+                    return;
+                }
+                if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') {
+                    e.preventDefault(); initAudio();
+                    if (!player.isJumping) {
+                        player.vy = -11.5; player.isJumping = true;
+                        player.isCrouching = false; player.crouchTimer = 0;
+                        spawnDust(player.x-6, GROUND_Y); spawnDust(player.x+6, GROUND_Y);
+                        playTone('jump');
+                    }
+                }
+                if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+                    e.preventDefault(); initAudio();
+                    isDownKeyHeld = true;
+                    crouchAction();
+                }
+            });
+            document.addEventListener('keyup', (e) => {
+                if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+                    e.preventDefault();
+                    isDownKeyHeld = false;
+                    crouchRelease();
+                }
+            });
+
+            if (isMobile) {
+                btnJump.addEventListener('pointerdown', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    initAudio();
+                    jumpAction();
+                });
+                btnCrouch.addEventListener('pointerdown', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    initAudio();
+                    crouchButtonHeld = true;
+                    crouchAction();
+                });
+                btnCrouch.addEventListener('pointerup', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    crouchButtonHeld = false;
+                    crouchRelease();
+                });
+                btnCrouch.addEventListener('pointerleave', () => {
+                    crouchButtonHeld = false;
+                    crouchRelease();
+                });
+                canvas.addEventListener('pointerdown', (e) => {
+                    e.preventDefault();
+                    initAudio();
+                    if (gameState === STATE.IDLE || gameState === STATE.OVER) {
+                        if (gameState === STATE.OVER) restartGame();
+                        else startGame();
+                    }
+                });
+            }
+
+            document.addEventListener('touchmove', (e) => {
+                if (e.target.closest('#wrapper')) e.preventDefault();
+            }, { passive: false });
+
+            // ==================== 游戏流程 ====================
+            function startGame() {
+                gameState = STATE.PLAYING; score = 0; gameSpeed = baseSpeed;
+                frameCount = 0; difficultyTimer = 0;
+                shakeAmount = 0; flashAlpha = 0;
+                obstacles = []; particles = [];
+                resetPlayer();
+                initMountains(); initGroundDots(); initClouds(); initBirds();
+                hintFadeTimer = 1.8; hintOpacity = 1;
+                hintBar.style.opacity = '1';
+                hintBar.textContent = isMobile ? '按钮跳跃 / 按住蹲下' : '↑ 跳跃  ↓ 蹲下';
+                crouchButtonHeld = false; isDownKeyHeld = false;
+            }
+            function restartGame() {
+                if (score > bestScore) bestScore = score;
+                startGame();
+            }
+            function endGame() {
+                gameState = STATE.OVER; shakeAmount = 14; flashAlpha = 0.5;
+                if (score > bestScore) bestScore = score;
+                spawnCollideParticles(player.x, player.y - player.height/2);
+                playTone('hit');
+                hintBar.style.opacity = '1';
+                hintBar.textContent = isMobile ? '点击屏幕重新开始' : '按任意键重新开始';
+            }
+
+            function checkCollision(a, b) {
+                return a.x+4 < b.x+b.w && a.x+a.w-4 > b.x && a.y+3 < b.y+b.h && a.y+a.h-3 > b.y;
+            }
+            let lastScoreSound = 0;
+            function tryScoreSound() {
+                const t = performance.now()/1000;
+                if (t - lastScoreSound > 0.25) { playTone('score'); lastScoreSound = t; }
+            }
+
+            function update(dt) {
+                if (gameState !== STATE.PLAYING) {
+                    updateParticles(dt); updateClouds(dt); updateBirds(dt);
+                    shakeAmount *= 0.85; flashAlpha *= 0.82;
+                    return;
+                }
+                difficultyTimer += dt;
+                if (difficultyTimer > 7.0 && gameSpeed < maxSpeed) {
+                    gameSpeed += speedIncrement; difficultyTimer = 0;
+                    if (gameSpeed > maxSpeed) gameSpeed = maxSpeed;
+                }
+                frameCount++;
+                if (player.isJumping) {
+                    player.vy += 0.55 * dt * 60;
+                    player.y += player.vy * dt * 60;
+                    if (player.y >= GROUND_Y) {
+                        player.y = GROUND_Y; player.vy = 0; player.isJumping = false;
+                        spawnDust(player.x-4, GROUND_Y); spawnDust(player.x+4, GROUND_Y);
+                    }
+                }
+                if (player.isCrouching && !isDownKeyHeld && !crouchButtonHeld) {
+                    player.crouchTimer -= dt*1000;
+                    if (player.crouchTimer <= 0) { player.isCrouching = false; player.crouchTimer = 0; }
+                }
+                if (!player.isJumping && !player.isCrouching) {
+                    player.bouncePhase += dt*14; player.bounceOffset = Math.abs(Math.sin(player.bouncePhase))*3.5;
+                } else { player.bounceOffset = 0; }
+                if (!player.isJumping && !player.isCrouching && frameCount%3===0) spawnDust(player.x-8, GROUND_Y-1);
+
+                for (const obs of obstacles) obs.x -= gameSpeed * dt * 60;
+                obstacles = obstacles.filter(o => o.x > -60);
+                const spawnInterval = Math.max(0.7, 1.6 - (gameSpeed-baseSpeed)*0.12);
+                const last = obstacles.length>0 ? obstacles[obstacles.length-1] : null;
+                if ((!last || (GAME_WIDTH+40 - last.x) > (200+Math.random()*180)) && (obstacles.length===0 || Math.random() < dt/spawnInterval)) spawnObstacle();
+
+                const pb = getPlayerBounds();
+                for (const obs of obstacles) {
+                    if (checkCollision(pb, getObstacleBounds(obs))) { endGame(); return; }
+                }
+                for (const obs of obstacles) {
+                    if (!obs.passed && obs.x+obs.width/2 < player.x-player.width/2) {
+                        obs.passed = true; score += 1; tryScoreSound();
+                    }
+                }
+                score += gameSpeed * dt * 0.06;
+
+                updateParticles(dt); updateClouds(dt); updateBirds(dt);
+                for (const m of bgMountains) {
+                    m.x -= gameSpeed*m.speedMul*dt*60;
+                    if (m.x+m.width < -40) { m.x = GAME_WIDTH+40+Math.random()*200; }
+                }
+                for (const d of groundDots) {
+                    d.x -= gameSpeed*dt*60;
+                    if (d.x < -10) { d.x = GAME_WIDTH+Math.random()*300; d.y = GROUND_Y+8+Math.random()*(GROUND_HEIGHT-16); }
+                }
+                shakeAmount *= 0.85; flashAlpha *= 0.82;
+                if (hintFadeTimer>0 && gameState===STATE.PLAYING) {
+                    hintFadeTimer -= dt;
+                    if (hintFadeTimer<=0) { hintOpacity = Math.max(0, hintOpacity-dt*2); hintBar.style.opacity = hintOpacity; }
+                }
+            }
+
+            // ==================== 渲染 ====================
+            function drawSky() {
+                const g = ctx.createLinearGradient(0,0,0,GROUND_Y);
+                g.addColorStop(0,'#f9f6f1'); g.addColorStop(0.55,'#f3efe8'); g.addColorStop(1,'#e8e2d8');
+                ctx.fillStyle = g; ctx.fillRect(0,0,GAME_WIDTH,GROUND_Y);
+            }
+            function drawMountains() {
+                for (const m of bgMountains) {
+                    ctx.fillStyle = m.color;
+                    ctx.beginPath();
+                    const cx=m.x, baseY=m.y, topY=baseY-m.height, hw=m.width/2;
+                    ctx.moveTo(cx-hw,baseY); ctx.quadraticCurveTo(cx-hw*0.3,topY,cx,topY-m.height*0.15);
+                    ctx.quadraticCurveTo(cx+hw*0.3,topY,cx+hw,baseY); ctx.closePath(); ctx.fill();
+                }
+            }
+            function drawGround() {
+                const g = ctx.createLinearGradient(0,GROUND_Y,0,GAME_HEIGHT);
+                g.addColorStop(0,'#5c4f42'); g.addColorStop(0.03,'#4d4136'); g.addColorStop(0.15,'#3d3229'); g.addColorStop(1,'#2e241d');
+                ctx.fillStyle=g; ctx.fillRect(0,GROUND_Y,GAME_WIDTH,GROUND_HEIGHT);
+                ctx.strokeStyle='#6b5d4f'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,GROUND_Y); ctx.lineTo(GAME_WIDTH,GROUND_Y); ctx.stroke();
+                for (const d of groundDots) {
+                    if (d.x>-5 && d.x<GAME_WIDTH+5) {
+                        ctx.fillStyle=`rgba(180,165,145,${d.alpha})`; ctx.beginPath(); ctx.arc(d.x,d.y,d.size,0,Math.PI*2); ctx.fill();
+                    }
+                }
+            }
+            function drawPlayer() {
+                const px=player.x, py=player.y, w=player.width;
+                const h = player.isCrouching ? player.crouchHeight : player.height;
+                const top = player.isCrouching ? py-h : getPlayerTop();
+                ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.beginPath(); ctx.ellipse(px,py-1,w/2-1,4,0,0,Math.PI*2); ctx.fill();
+                const grad = ctx.createLinearGradient(px-w/2,top,px+w/2,py);
+                grad.addColorStop(0,player.colorLight); grad.addColorStop(0.5,player.color); grad.addColorStop(1,player.colorDark);
+                ctx.fillStyle=grad;
+                ctx.beginPath(); ctx.roundRect(px-w/2,top,w,h,7); ctx.fill();
+                const eyeY = top + h*0.35, eyeSize = player.isCrouching?2.5:3.2;
+                ctx.fillStyle=player.eyeColor;
+                ctx.beginPath(); ctx.arc(px-5,eyeY,eyeSize,0,Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(px+5,eyeY,eyeSize,0,Math.PI*2); ctx.fill();
+                ctx.fillStyle='#fff';
+                ctx.beginPath(); ctx.arc(px-4,eyeY-1.2,eyeSize*0.35,0,Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(px+6,eyeY-1.2,eyeSize*0.35,0,Math.PI*2); ctx.fill();
+                if (player.isCrouching) {
+                    ctx.strokeStyle=player.eyeColor; ctx.lineWidth=1.2;
+                    ctx.beginPath(); ctx.arc(px-5,eyeY+3,2.5,0,Math.PI); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(px+5,eyeY+3,2.5,0,Math.PI); ctx.stroke();
+                }
+            }
+            function drawObstacles() {
+                for (const obs of obstacles) {
+                    const b = getObstacleBounds(obs);
+                    ctx.fillStyle='rgba(0,0,0,0.1)'; ctx.beginPath(); ctx.roundRect(obs.x-obs.width/2+2,b.y+2,obs.width,obs.height,5); ctx.fill();
+                    const grad = ctx.createLinearGradient(obs.x-obs.width/2,b.y,obs.x+obs.width/2,b.y+obs.height);
+                    grad.addColorStop(0,'#6b5f53'); grad.addColorStop(0.5,'#5c5348'); grad.addColorStop(1,'#4a4239');
+                    ctx.fillStyle=grad;
+                    ctx.beginPath(); ctx.roundRect(obs.x-obs.width/2,b.y,obs.width,obs.height,5); ctx.fill();
+                    if (obs.type===OBSTACLE_TYPES.GROUND) {
+                        ctx.fillStyle='rgba(255,250,240,0.06)'; ctx.fillRect(obs.x-obs.width/2+3,b.y,obs.width-6,3);
+                    } else {
+                        ctx.fillStyle='rgba(220,160,130,0.4)'; ctx.fillRect(obs.x-obs.width/2+3,b.y+obs.height-6,obs.width-6,3);
+                    }
+                }
+            }
+            function drawScore() {
+                ctx.fillStyle='#3d352d'; ctx.font='600 22px sans-serif'; ctx.textAlign='right';
+                ctx.fillText(Math.floor(score).toString(), GAME_WIDTH-28, 36);
+                if (bestScore>0) {
+                    ctx.fillStyle='#a0968a'; ctx.font='400 12px sans-serif';
+                    ctx.fillText('最佳 '+Math.floor(bestScore), GAME_WIDTH-28, 55);
+                }
+            }
+            function drawTitle() {
+                ctx.fillStyle='rgba(100,85,70,0.28)'; ctx.font='italic 20px "KaiTi","楷体",serif'; ctx.textAlign='left';
+                ctx.fillText('踏云行', 22, 38);
+            }
+            function drawStartScreen() {
+                ctx.fillStyle='rgba(245,240,235,0.75)'; ctx.fillRect(0,0,GAME_WIDTH,GAME_HEIGHT);
+                const cw=280, ch=180, cx=GAME_WIDTH/2-cw/2, cy=GAME_HEIGHT/2-ch/2-10;
+                ctx.fillStyle='#faf7f2'; ctx.beginPath(); ctx.roundRect(cx,cy,cw,ch,16); ctx.fill();
+                ctx.fillStyle='#5c4f42'; ctx.font='italic 32px "KaiTi","楷体",serif'; ctx.textAlign='center';
+                ctx.fillText('踏云行', GAME_WIDTH/2, cy+52);
+                ctx.fillStyle='#9a8e80'; ctx.font='14px sans-serif';
+                ctx.fillText('历史最高分', GAME_WIDTH/2, cy+85);
+                ctx.fillStyle='#3d352d'; ctx.font='bold 36px sans-serif';
+                ctx.fillText(Math.floor(bestScore).toString(), GAME_WIDTH/2, cy+125);
+                ctx.fillStyle='#b0a598'; ctx.font='13px sans-serif';
+                ctx.fillText(isMobile ? '点击屏幕开始' : '按任意键开始', GAME_WIDTH/2, cy+155);
+            }
+            function drawGameOverOverlay() {
+                ctx.fillStyle='rgba(30,25,20,0.55)'; ctx.fillRect(0,0,GAME_WIDTH,GAME_HEIGHT);
+                const cw=260, ch=150, cx=GAME_WIDTH/2-cw/2, cy=GAME_HEIGHT/2-ch/2-10;
+                ctx.fillStyle='#faf7f2'; ctx.beginPath(); ctx.roundRect(cx,cy,cw,ch,14); ctx.fill();
+                ctx.fillStyle='#3d352d'; ctx.font='600 38px sans-serif'; ctx.textAlign='center';
+                ctx.fillText(Math.floor(score).toString(), GAME_WIDTH/2, cy+58);
+                ctx.fillStyle='#9a8e80'; ctx.font='13px sans-serif'; ctx.fillText('得分', GAME_WIDTH/2, cy+28);
+                if (bestScore>0 && Math.floor(score)>=Math.floor(bestScore)) {
+                    ctx.fillStyle='#c17d5b'; ctx.font='500 11px sans-serif'; ctx.fillText('★ 新纪录', GAME_WIDTH/2, cy+80);
+                } else if (bestScore>0) {
+                    ctx.fillStyle='#b0a598'; ctx.font='400 11px sans-serif'; ctx.fillText('最佳 '+Math.floor(bestScore), GAME_WIDTH/2, cy+80);
+                }
+                ctx.fillStyle='#b0a598'; ctx.font='12px sans-serif';
+                ctx.fillText(isMobile ? '点击屏幕重新开始' : '按任意键重新开始', GAME_WIDTH/2, cy+ch-18);
+            }
+
+            function render() {
+                ctx.clearRect(0,0,GAME_WIDTH,GAME_HEIGHT);
+                let sx=0, sy=0;
+                if (shakeAmount>0.1) { sx=(Math.random()-0.5)*shakeAmount; sy=(Math.random()-0.5)*shakeAmount; }
+                ctx.save(); ctx.translate(sx,sy);
+                drawSky(); drawClouds(ctx); drawBirds(ctx); drawMountains(); drawGround();
+                drawObstacles(); drawParticles(ctx); drawPlayer(); drawScore(); drawTitle();
+                ctx.restore();
+                if (flashAlpha>0.01) { ctx.fillStyle=`rgba(255,200,170,${flashAlpha})`; ctx.fillRect(0,0,GAME_WIDTH,GAME_HEIGHT); }
+                if (gameState===STATE.IDLE) drawStartScreen();
+                if (gameState===STATE.OVER) drawGameOverOverlay();
+            }
+
+            if (!ctx.roundRect) {
+                ctx.roundRect = function(x,y,w,h,r) {
+                    if (typeof r==='number') r={tl:r,tr:r,br:r,bl:r};
+                    ctx.beginPath(); ctx.moveTo(x+r.tl,y); ctx.lineTo(x+w-r.tr,y);
+                    ctx.quadraticCurveTo(x+w,y,x+w,y+r.tr); ctx.lineTo(x+w,y+h-r.br);
+                    ctx.quadraticCurveTo(x+w,y+h,x+w-r.br,y+h); ctx.lineTo(x+r.bl,y+h);
+                    ctx.quadraticCurveTo(x,y+h,x,y+h-r.bl); ctx.lineTo(x,y+r.tl);
+                    ctx.quadraticCurveTo(x,y,x+r.tl,y); ctx.closePath();
+                };
+            }
+
+            function fullInit() {
+                resetPlayer(); obstacles=[]; particles=[]; score=0; gameSpeed=baseSpeed;
+                frameCount=0; difficultyTimer=0; shakeAmount=0; flashAlpha=0;
+                gameState=STATE.IDLE; hintOpacity=1; hintFadeTimer=0;
+                hintBar.style.opacity='1';
+                hintBar.textContent = isMobile ? '按钮跳跃 / 按住蹲下' : '↑ 跳跃  ↓ 蹲下 · 按任意键开始';
+                initMountains(); initGroundDots(); initClouds(); initBirds();
+                crouchButtonHeld = false; isDownKeyHeld = false;
+            }
+            fullInit();
+
+            let lastTime = performance.now();
+            function gameLoop(ts) {
+                let dt = (ts - lastTime)/1000;
+                if (dt<=0) dt=0.016; if (dt>0.15) dt=0.15;
+                lastTime = ts;
+                update(dt); render();
+                requestAnimationFrame(gameLoop);
+            }
+            requestAnimationFrame(gameLoop);
+        })();
+    </script>
+</body>
+</html>
